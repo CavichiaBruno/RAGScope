@@ -14,7 +14,7 @@
 import "dotenv/config"
 import { Mistral } from "@mistralai/mistralai"
 import { detectIssues, scoreWithLLM } from "./evaluator.js"
-import { saveTrace, getSummary, type ChunkTrace, type QueryTrace } from "./tracker.js"
+import { saveTrace, getSummary, type ChunkTrace, type QueryTrace, type Issue } from "./tracker.js"
 import { Indexer, type IndexedChunk } from "./indexer.js"
 import { DatasetGenerator } from "./generator.js"
 import crypto from "crypto"
@@ -356,6 +356,48 @@ async function runDatasetEvaluation(dataset: DatasetItem[], index: IndexedChunk[
   console.log("═".repeat(60) + "\n");
 }
 
+// ── ask command ───────────────────────────────
+
+interface ConfidenceResult {
+  label: string;
+  score: string;
+}
+
+function calculateConfidence(chunks: ChunkTrace[], issues: Issue[]): ConfidenceResult {
+  if (chunks.length === 0) return { label: "LOW", score: "0.00" };
+  const avgScore = chunks.reduce((s, c) => s + c.similarityScore, 0) / chunks.length;
+  if (issues.length > 0 || avgScore < 0.70) return { label: "LOW",    score: avgScore.toFixed(2) };
+  if (avgScore < 0.80)                       return { label: "MEDIUM", score: avgScore.toFixed(2) };
+  return                                            { label: "HIGH",   score: avgScore.toFixed(2) };
+}
+
+async function askCommand(index: IndexedChunk[], question: string): Promise<void> {
+  const chunks  = await hybridRetrieve(question, index, 3);
+  const answer  = await generate(question, chunks);
+  const issues  = detectIssues(chunks, question, index);
+  const conf    = calculateConfidence(chunks, issues);
+
+  const sep = "─".repeat(60);
+
+  console.log(`\n${sep}`);
+  console.log(`\n  ${answer.trim().split("\n").join("\n  ")}`);
+  console.log(`\n${sep}`);
+  console.log(`\nConfidence : ${conf.label} (${conf.score})`);
+  console.log(`Sources    :`);
+  for (const c of chunks) {
+    console.log(`   - ${c.id}  (score: ${c.similarityScore.toFixed(3)})`);
+  }
+
+  if (issues.length > 0) {
+    console.log(`\nWarnings:`);
+    for (const issue of issues) {
+      console.log(`   [${issue.type}] ${issue.detail}`);
+    }
+  } else {
+    console.log(`\nNo issues detected.`);
+  }
+}
+
 async function main() {
   if (!process.env.MISTRAL_API_KEY) {
     console.error("[ERROR] Missing MISTRAL_API_KEY in .env file")
@@ -363,15 +405,33 @@ async function main() {
   }
 
   const args = process.argv.slice(2);
+  const isAsk            = args.includes("--ask");
   const isGenerateDataset = args.includes("--generate-dataset") || args.includes("--full");
   const isRunEval         = args.includes("--eval")             || args.includes("--full");
   const datasetPathArg    = args.find(a => a.startsWith("--dataset="))?.split("=")[1];
   const datasetPath       = datasetPathArg || "ragscope-dataset.json";
 
-  console.log("[INFO] Starting RAGScope...\n");
-  const index = await buildIndex()
-  console.log(`[INFO] Indexed ${index.length} chunks\n`)
+  // For --ask, the question is the argument after --ask
+  const askIdx      = args.indexOf("--ask");
+  const askQuestion = isAsk ? args[askIdx + 1] : null;
 
+  if (isAsk && !askQuestion) {
+    console.error("[ERROR] --ask requires a question.");
+    console.error(`[INFO]  Usage: npx tsx src/example.ts <path> --ask "your question"`);
+    process.exit(1);
+  }
+
+  console.log("[INFO] Starting RAGScope...\n");
+  const index = await buildIndex();
+  console.log(`[INFO] Indexed ${index.length} chunks\n`);
+
+  // ── ask: single natural-language query ───────
+  if (isAsk && askQuestion) {
+    await askCommand(index, askQuestion);
+    return;
+  }
+
+  // ── generate + eval ──────────────────────────
   if (isGenerateDataset) {
     const generator = new DatasetGenerator(process.env.MISTRAL_API_KEY!);
     const dataset = await generator.generate(index, 10);
@@ -391,18 +451,18 @@ async function main() {
     return;
   }
 
-  // Default: run a set of generic queries if no flags are passed
+  // ── default: generic demo queries ────────────
   const queries = [
     "What functions or methods are defined in this codebase?",
     "How is authentication handled?",
     "What database models or schemas are defined?",
-  ]
+  ];
 
   for (const query of queries) {
-    await ragWithTracking(query, index)
+    await ragWithTracking(query, index);
   }
 
-  printSummary()
+  printSummary();
 }
 
-main().catch(console.error)
+main().catch(console.error);

@@ -28,7 +28,36 @@ MISTRAL_API_KEY=your_api_key_here
 MISTRAL_MODEL=mistral-small-latest   # optional, defaults to mistral-small-latest
 ```
 
-### 3. Run against any codebase
+### 3. Ask a question (main command)
+
+```bash
+npx tsx src/example.ts /path/to/your/repo --ask "Where is scroll handled in Hero?"
+```
+
+Output:
+```
+────────────────────────────────────────────────────────────
+
+  Scroll is handled in Hero.tsx's handleScroll method (line 32).
+  It uses an easing function to calculate logo transformations
+  and sets a 150ms timeout to detect when scrolling stops.
+
+────────────────────────────────────────────────────────────
+
+Confidence : HIGH (0.89)
+Sources    :
+   - src/app/components/Hero.tsx:32:42  (score: 0.891)
+   - src/app/components/Hero.tsx:71:95  (score: 0.743)
+
+No issues detected.
+```
+
+**Confidence levels:**
+- `HIGH` — avg similarity > 0.80, no issues detected
+- `MEDIUM` — avg similarity 0.70–0.80
+- `LOW` — avg similarity < 0.70 or issues found (results may be unreliable)
+
+### 4. Evaluation pipeline (internal / CI)
 
 **Default mode** — runs a set of generic queries and prints a quality report:
 ```bash

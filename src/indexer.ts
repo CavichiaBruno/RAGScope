@@ -91,23 +91,67 @@ export class Indexer {
     console.log(`[INFO] Index saved to ${filePath}`);
   }
 
+  // ── Directories that should never be indexed ──────────────────────────────
+  private static readonly IGNORED_DIRS = new Set([
+    // VCS / tooling
+    ".git", ".svn", ".hg",
+    // JS/TS build output
+    "node_modules", "dist", "build", "out", ".next", ".nuxt", ".turbo",
+    ".vercel", ".netlify", ".cache", ".parcel-cache", ".webpack",
+    ".swc", ".tsbuildinfo",
+    // Framework caches
+    "vendor-chunks", "__pycache__", ".pytest_cache", ".mypy_cache",
+    // Laravel / PHP
+    "vendor", "storage", "bootstrap/cache", "public",
+    // Generated / coverage
+    "coverage", ".nyc_output", "storybook-static", "tmp", "temp",
+  ]);
+
+  // ── File-level patterns that indicate auto-generated content ──────────────
+  private static isGeneratedFile(filename: string): boolean {
+    // Minified files
+    if (filename.endsWith(".min.js") || filename.endsWith(".min.ts")) return true;
+    // Source maps
+    if (filename.endsWith(".map")) return true;
+    // Next.js / webpack hot-update chunks (e.g. layout.0630d2f6.hot-update.js)
+    if (/\.hot-update\.(js|json)$/.test(filename)) return true;
+    // Webpack runtime / manifest files
+    if (/^(webpack-runtime|_buildManifest|_ssgManifest)/.test(filename)) return true;
+    // Files with content hashes in their name (16+ hex chars, common in bundlers)
+    if (/\.[0-9a-f]{8,}\.(js|ts|jsx|tsx)$/.test(filename)) return true;
+    // Typical bundled chunk names
+    if (/^(chunk|vendor|polyfills|runtime|framework|main|app|commons)\b/.test(filename) && filename.endsWith(".js")) return true;
+    // client-reference-manifest, server-reference-manifest, etc.
+    if (filename.includes("-reference-manifest") || filename.includes("-build-manifest")) return true;
+    return false;
+  }
+
   private getAllFiles(dir: string, fileList: string[] = []): string[] {
     const files = fs.readdirSync(dir);
     for (const file of files) {
-      const name = path.join(dir, file);
-      if (fs.statSync(name).isDirectory()) {
-        const ignoreList = ["node_modules", ".git", "dist", "vendor", "storage", "bootstrap/cache", "public"];
-        if (ignoreList.includes(file)) continue;
-        this.getAllFiles(name, fileList);
+      const fullPath = path.join(dir, file);
+      const stat = fs.statSync(fullPath);
+
+      if (stat.isDirectory()) {
+        if (Indexer.IGNORED_DIRS.has(file)) continue;
+        this.getAllFiles(fullPath, fileList);
       } else {
+        // Layer 1: extension allow-list
         const allowedExtensions = [".ts", ".js", ".tsx", ".jsx", ".php"];
-        if (allowedExtensions.some(ext => file.endsWith(ext))) {
-          fileList.push(name);
-        }
+        if (!allowedExtensions.some(ext => file.endsWith(ext))) continue;
+
+        // Layer 2: filename heuristics — skip generated/bundled files
+        if (Indexer.isGeneratedFile(file)) continue;
+
+        // Layer 3: size cap — skip files > 200KB (likely vendor bundles)
+        if (stat.size > 200 * 1024) continue;
+
+        fileList.push(fullPath);
       }
     }
     return fileList;
   }
+
 
   /**
    * Splits a file into function-level chunks using tree-sitter (WASM)
@@ -123,7 +167,7 @@ export class Indexer {
         const treeChunks = await this.parser.parse(content, lang);
         
         if (treeChunks.length > 0) {
-          return treeChunks.map(tc => ({
+          const chunks = treeChunks.map(tc => ({
             id: `${filename}:${tc.startLine}:${tc.endLine}`,
             content: tc.content,
             metadata: {
@@ -136,6 +180,7 @@ export class Indexer {
             tokenCount: Math.ceil(tc.content.length / 4),
             isTruncated: false
           }));
+          return this.mergeSmallChunks(chunks);
         }
       } catch (err) {
         console.warn(`   [WARN] Tree-sitter failed for ${filename}, falling back to regex.`, err);
@@ -143,7 +188,58 @@ export class Indexer {
     }
 
     // Fallback to regex chunking (original logic)
-    return this.regexChunkFile(filename, content);
+    return this.mergeSmallChunks(this.regexChunkFile(filename, content));
+  }
+
+  /**
+   * Merges chunks that span fewer than MIN_CHUNK_LINES lines into the adjacent chunk.
+   * Tiny chunks (e.g. single-liner arrow functions) have too little context to be
+   * retrieved reliably — absorbing them into their neighbour fixes this.
+   */
+  private readonly MIN_CHUNK_LINES = 5;
+
+  private mergeSmallChunks(chunks: IndexedChunk[]): IndexedChunk[] {
+    if (chunks.length <= 1) return chunks;
+
+    const chunkLineCount = (c: IndexedChunk): number => {
+      const [start, end] = c.metadata.lines.split(":").map(Number);
+      return end - start + 1;
+    };
+
+    const merged: IndexedChunk[] = [];
+
+    for (let i = 0; i < chunks.length; i++) {
+      const current = chunks[i];
+      const lines = chunkLineCount(current);
+
+      if (lines >= this.MIN_CHUNK_LINES) {
+        merged.push(current);
+        continue;
+      }
+
+      // Tiny chunk — try to merge into the previous chunk
+      if (merged.length > 0) {
+        const prev = merged[merged.length - 1];
+        const [prevStart] = prev.metadata.lines.split(":").map(Number);
+        const [, curEnd]  = current.metadata.lines.split(":").map(Number);
+
+        merged[merged.length - 1] = {
+          ...prev,
+          id: `${prev.metadata.file}:${prevStart}:${curEnd}`,
+          content: prev.content + "\n" + current.content,
+          metadata: {
+            ...prev.metadata,
+            lines: `${prevStart}:${curEnd}`,
+          },
+          tokenCount: Math.ceil((prev.content.length + current.content.length) / 4),
+        };
+      } else {
+        // No previous chunk yet — hold it and merge with the next iteration
+        merged.push(current);
+      }
+    }
+
+    return merged;
   }
 
   private regexChunkFile(filename: string, content: string): IndexedChunk[] {
