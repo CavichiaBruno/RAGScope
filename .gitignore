@@ -1,0 +1,22 @@
+# Dependencies
+node_modules/
+
+# Environment
+.env
+.env.*
+
+# Build output
+dist/
+build/
+
+# RAGScope runtime artifacts
+.ragscope_cache_*.json
+ragscope-dataset.json
+output.log
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
