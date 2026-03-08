@@ -362,17 +362,36 @@ async function main() {
     process.exit(1)
   }
 
-  const targetPath = process.argv[2];
-  if (!targetPath) {
-    console.error("[ERROR] No path provided.")
-    console.error("[INFO]  Usage: npx tsx src/example.ts <path_to_repo>")
-    process.exit(1)
-  }
+  const args = process.argv.slice(2);
+  const isGenerateDataset = args.includes("--generate-dataset") || args.includes("--full");
+  const isRunEval         = args.includes("--eval")             || args.includes("--full");
+  const datasetPathArg    = args.find(a => a.startsWith("--dataset="))?.split("=")[1];
+  const datasetPath       = datasetPathArg || "ragscope-dataset.json";
 
   console.log("[INFO] Starting RAGScope...\n");
   const index = await buildIndex()
   console.log(`[INFO] Indexed ${index.length} chunks\n`)
 
+  if (isGenerateDataset) {
+    const generator = new DatasetGenerator(process.env.MISTRAL_API_KEY!);
+    const dataset = await generator.generate(index, 10);
+    generator.saveDataset(dataset, datasetPath);
+    console.log(`[INFO] Dataset saved to ${datasetPath}\n`);
+    if (!isRunEval) return;
+  }
+
+  if (isRunEval) {
+    if (!fs.existsSync(datasetPath)) {
+      console.error(`[ERROR] Dataset not found: ${datasetPath}`);
+      console.error(`[INFO]  Run with --generate-dataset first, or use --full to do both at once.`);
+      process.exit(1);
+    }
+    const dataset = JSON.parse(fs.readFileSync(datasetPath, "utf-8")) as DatasetItem[];
+    await runDatasetEvaluation(dataset, index);
+    return;
+  }
+
+  // Default: run a set of generic queries if no flags are passed
   const queries = [
     "What functions or methods are defined in this codebase?",
     "How is authentication handled?",
